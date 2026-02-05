@@ -1,0 +1,17 @@
+[package]
+name = "RustSight"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+burn = { version = "0.20.1", features = ["vision", "wgpu"] }
+burn-wgpu = "0.20.1"
+image = "0.25.9"
+ndarray = "0.17.2"
+opencv = "0.98.1"
+ort = { version = "2.0.0-rc.9", features = ["directml"] }
+tokio = { version = "1.49.0", features = ["full"] }
+
+[build-dependencies]
+burn-import = "0.20.1"

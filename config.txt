@@ -1,0 +1,7 @@
+$env:OPENCV_LINK_LIBS="opencv_world4130"
+$env:OPENCV_LINK_PATHS="C:\tools\opencv\build\x64\vc16\lib"
+$env:OPENCV_INCLUDE_PATHS="C:\tools\opencv\build\include"
+$env:CXX="clang-cl"
+$env:CXXFLAGS="--target=x86_64-pc-windows-msvc"
+$env:Path += ";C:\tools\opencv\build\x64\vc16\bin"
+cargo run --target x86_64-pc-windows-msvc --release -- .\video.mp4 --model model/scrfd_500m_bnkps.onnx --confidence 0.5 --fps
