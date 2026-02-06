@@ -1,7 +1,12 @@
 use anyhow::{Context, Result};
 use ndarray::Array4;
 use opencv::{core, highgui, imgproc, prelude::*, videoio};
-use ort::{execution_providers::{DirectMLExecutionProvider, QNNExecutionProvider}, inputs, session::Session, value::Value};
+use ort::{
+    execution_providers::{DirectMLExecutionProvider, QNNExecutionProvider},
+    inputs,
+    session::Session,
+    value::Value,
+};
 use std::env;
 use std::time::{Duration, Instant};
 
@@ -94,7 +99,13 @@ fn letterbox(img: &core::Mat, size: (i32, i32)) -> Result<(core::Mat, f32, i32, 
 
 fn to_tensor_ndarray(mat: &core::Mat) -> Result<Array4<f32>> {
     let mut rgb = core::Mat::default();
-    imgproc::cvt_color(mat, &mut rgb, imgproc::COLOR_BGR2RGB, 0, core::AlgorithmHint::ALGO_HINT_APPROX)?;
+    imgproc::cvt_color(
+        mat,
+        &mut rgb,
+        imgproc::COLOR_BGR2RGB,
+        0,
+        core::AlgorithmHint::ALGO_HINT_APPROX,
+    )?;
 
     let mut float_mat = core::Mat::default();
     // (x - 127.5) / 128.0  => x * (1/128) - (127.5/128)
@@ -111,7 +122,12 @@ fn to_tensor_ndarray(mat: &core::Mat) -> Result<Array4<f32>> {
         let plane = planes.get(i)?;
         let data = plane.data_bytes()?;
         let slice = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, rows * cols) };
-        array.index_axis_mut(ndarray::Axis(1), i).assign(&ndarray::Array2::from_shape_vec((rows, cols), slice.to_vec())?);
+        array
+            .index_axis_mut(ndarray::Axis(1), i)
+            .assign(&ndarray::Array2::from_shape_vec(
+                (rows, cols),
+                slice.to_vec(),
+            )?);
     }
     Ok(array)
 }
@@ -171,22 +187,40 @@ fn scrfd_infer(session: &mut Session, input: Array4<f32>) -> Result<(Vec<f32>, V
     Ok((all_boxes, all_scores))
 }
 
+use std::process::Command;
+
+fn get_youtube_url(url: &str) -> Result<String> {
+    let output = Command::new(".\\yt-dlp.exe")
+        .args([
+            "-f", "bestvideo[height<=720]/best[height<=720]",
+            "--get-url",
+            "--no-playlist",
+            url,
+        ])
+        .output()
+        .context("Failed to execute yt-dlp.exe")?;
+    if !output.status.success() {
+        anyhow::bail!("yt-dlp failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    let stdout = String::from_utf8(output.stdout)?;
+    let urls: Vec<&str> = stdout.trim().lines().collect();
+    if urls.is_empty() { anyhow::bail!("No URL found by yt-dlp"); }
+    Ok(urls[0].to_string())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    let video_src = if args.len() > 1 {
-        if args[1].starts_with("--") {
-            "0".to_string()
-        } else {
-            args[1].clone()
-        }
-    } else {
-        "0".to_string()
-    };
+    let mut video_src = if args.len() > 1 {
+        if args[1].starts_with("--") { "0".to_string() } else { args[1].clone() }
+    } else { "0".to_string() };
+
+    if video_src.starts_with("http") {
+        video_src = get_youtube_url(&video_src)?;
+    }
+
     let width_opt: i32 = parse_arg_value(&args, "--width", "0").parse().unwrap_or(0);
     let height_opt: i32 = parse_arg_value(&args, "--height", "0").parse().unwrap_or(0);
-    let conf_threshold: f32 = parse_arg_value(&args, "--confidence", "0.5")
-        .parse()
-        .unwrap_or(0.5);
+    let conf_threshold: f32 = parse_arg_value(&args, "--confidence", "0.5").parse().unwrap_or(0.5);
     let show_fps = args.iter().any(|a| a == "--fps");
     let model_path = parse_arg_value(&args, "--model", "model/scrfd_500m_bnkps.onnx");
 
@@ -202,24 +236,17 @@ fn main() -> Result<()> {
 
     let mut cam = if video_src == "0" {
         let mut c = videoio::VideoCapture::new(0, videoio::CAP_ANY).context("camera")?;
-        if width_opt > 0 {
-            let _ = c.set(videoio::CAP_PROP_FRAME_WIDTH, width_opt as f64);
-        }
-        if height_opt > 0 {
-            let _ = c.set(videoio::CAP_PROP_FRAME_HEIGHT, height_opt as f64);
-        }
+        if width_opt > 0 { let _ = c.set(videoio::CAP_PROP_FRAME_WIDTH, width_opt as f64); }
+        if height_opt > 0 { let _ = c.set(videoio::CAP_PROP_FRAME_HEIGHT, height_opt as f64); }
         let _ = c.set(videoio::CAP_PROP_FPS, 60.0);
         let _ = c.set(videoio::CAP_PROP_BUFFERSIZE, 1.0);
         c
     } else {
-        let mut c = videoio::VideoCapture::from_file(&video_src, videoio::CAP_ANY)
-            .with_context(|| format!("video {}", video_src))?;
+        let mut c = videoio::VideoCapture::from_file(&video_src, videoio::CAP_ANY).with_context(|| format!("video {}", video_src))?;
         let _ = c.set(videoio::CAP_PROP_BUFFERSIZE, 1.0);
         c
     };
-    if !videoio::VideoCapture::is_opened(&cam)? {
-        anyhow::bail!("source not opened")
-    }
+    if !videoio::VideoCapture::is_opened(&cam)? { anyhow::bail!("source not opened") }
 
     let window = "RustSight - SCRFD Multi-Scale";
     highgui::named_window(window, highgui::WINDOW_NORMAL).context("window")?;

@@ -1,13 +1,5 @@
-# Commande pour compiler et lancer nativement sur ARM64 (Surface Pro 12)
-# Assurez-vous d'avoir installé la cible rustup : rustup target add aarch64-pc-windows-msvc
-# Et d'avoir les libs OpenCV pour ARM64.
+$env:OPENCV_DISABLE_PROBES="cmake,pkg_config";$env:OPENCV_INCLUDE_PATHS="C:\vcpkg\installed\arm64-windows\include\opencv4";$env:OPENCV_LINK_PATHS="C:\vcpkg\installed\arm64-windows\lib";$env:OPENCV_LINK_LIBS="opencv_core4,opencv_imgproc4,opencv_highgui4,opencv_videoio4,opencv_imgcodecs4,opencv_video4,opencv_objdetect4"; $env:CXX="clang-cl"; $env:CXXFLAGS="--target=aarch64-pc-windows-msvc";$env:Path="C:\vcpkg\installed\arm64-windows\bin;"+$env:Path; cargo run --release --target aarch64-pc-windows-msvc -- 0
 
-$env:OPENCV_LINK_LIBS="opencv_world4130"; 
-$env:OPENCV_LINK_PATHS="C:\tools\opencv_arm64\build\lib"; 
-$env:OPENCV_INCLUDE_PATHS="C:\tools\opencv_arm64\build\include"; 
-$env:CXX="clang-cl"; 
-$env:CXXFLAGS="--target=aarch64-pc-windows-msvc"; 
-$env:Path += ";C:\tools\opencv_arm64\build\bin"; 
+$env:OPENCV_DISABLE_PROBES="cmake,pkg_config";$env:OPENCV_INCLUDE_PATHS="C:\vcpkg\installed\arm64-windows\include\opencv4";$env:OPENCV_LINK_PATHS="C:\vcpkg\installed\arm64-windows\lib";$env:OPENCV_LINK_LIBS="opencv_core4,opencv_imgproc4,opencv_highgui4,opencv_videoio4,opencv_imgcodecs4,opencv_video4,opencv_objdetect4"; $env:CXX="clang-cl"; $env:CXXFLAGS="--target=aarch64-pc-windows-msvc";$env:Path="C:\vcpkg\installed\arm64-windows\bin;"+$env:Path; cargo run --release --target aarch64-pc-windows-msvc -- "https://www.youtube.com/watch?v=eaZ8zqVp4kc"
 
-# Utilisation du NPU via QNN/DirectML
-cargo run --target aarch64-pc-windows-msvc --release -- .\video.mp4 --model model/scrfd_500m_bnkps.onnx --confidence 0.5 --fps
+$env:OPENCV_DISABLE_PROBES="cmake,pkg_config";$env:OPENCV_INCLUDE_PATHS="C:\vcpkg\installed\arm64-windows\include\opencv4";$env:OPENCV_LINK_PATHS="C:\vcpkg\installed\arm64-windows\lib";$env:OPENCV_LINK_LIBS="opencv_core4,opencv_imgproc4,opencv_highgui4,opencv_videoio4,opencv_imgcodecs4,opencv_video4,opencv_objdetect4"; $env:CXX="clang-cl"; $env:CXXFLAGS="--target=aarch64-pc-windows-msvc";$env:Path="C:\vcpkg\installed\arm64-windows\bin;"+$env:Path; cargo run --release --target aarch64-pc-windows-msvc -- .\video.mp4

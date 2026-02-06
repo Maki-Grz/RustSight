@@ -2,3 +2,4 @@
 Cargo.lock
 *.onnx
 *.mp4
+*.exe
