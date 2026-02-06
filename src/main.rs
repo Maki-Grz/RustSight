@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ndarray::Array4;
 use opencv::{core, highgui, imgproc, prelude::*, videoio};
-use ort::{inputs, session::Session, value::Value};
+use ort::{execution_providers::{DirectMLExecutionProvider, QNNExecutionProvider}, inputs, session::Session, value::Value};
 use std::env;
 use std::time::{Duration, Instant};
 
@@ -93,27 +93,25 @@ fn letterbox(img: &core::Mat, size: (i32, i32)) -> Result<(core::Mat, f32, i32, 
 }
 
 fn to_tensor_ndarray(mat: &core::Mat) -> Result<Array4<f32>> {
-    let rows = mat.rows();
-    let cols = mat.cols();
     let mut rgb = core::Mat::default();
-    imgproc::cvt_color(
-        mat,
-        &mut rgb,
-        imgproc::COLOR_BGR2RGB,
-        0,
-        core::AlgorithmHint::ALGO_HINT_APPROX,
-    )?;
-    let data = rgb.data_bytes()?;
+    imgproc::cvt_color(mat, &mut rgb, imgproc::COLOR_BGR2RGB, 0, core::AlgorithmHint::ALGO_HINT_APPROX)?;
 
-    let mut array = Array4::<f32>::zeros((1, 3, rows as usize, cols as usize));
-    for y in 0..rows as usize {
-        for x in 0..cols as usize {
-            let idx = (y * cols as usize + x) * 3;
-            // Normalisation SCRFD standard: (x - 127.5) / 128.0
-            array[[0, 0, y, x]] = (data[idx] as f32 - 127.5) / 128.0;
-            array[[0, 1, y, x]] = (data[idx + 1] as f32 - 127.5) / 128.0;
-            array[[0, 2, y, x]] = (data[idx + 2] as f32 - 127.5) / 128.0;
-        }
+    let mut float_mat = core::Mat::default();
+    // (x - 127.5) / 128.0  => x * (1/128) - (127.5/128)
+    rgb.convert_to(&mut float_mat, core::CV_32F, 0.0078125, -0.99609375)?;
+
+    let rows = float_mat.rows() as usize;
+    let cols = float_mat.cols() as usize;
+    let mut array = Array4::<f32>::zeros((1, 3, rows, cols));
+
+    let mut planes = opencv::core::Vector::<core::Mat>::new();
+    core::split(&float_mat, &mut planes)?;
+
+    for i in 0..3 {
+        let plane = planes.get(i)?;
+        let data = plane.data_bytes()?;
+        let slice = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, rows * cols) };
+        array.index_axis_mut(ndarray::Axis(1), i).assign(&ndarray::Array2::from_shape_vec((rows, cols), slice.to_vec())?);
     }
     Ok(array)
 }
@@ -137,8 +135,6 @@ fn scrfd_infer(session: &mut Session, input: Array4<f32>) -> Result<(Vec<f32>, V
         let scores = scores_view.1;
         let bboxes = bboxes_view.1;
 
-        // La dimension attendue est [1, num_anchors * H * W, 1] ou similaire
-        // Pour SCRFD, il y a généralement 2 ancres par position
         let num_points = scores.len();
         let num_anchors = 2;
 
@@ -150,7 +146,7 @@ fn scrfd_infer(session: &mut Session, input: Array4<f32>) -> Result<(Vec<f32>, V
                 continue;
             }
 
-            let anchor_idx = idx % num_anchors;
+            let _anchor_idx = idx % num_anchors;
             let grid_idx = idx / num_anchors;
             let row = (grid_idx / feat_w as usize) as f32;
             let col = (grid_idx % feat_w as usize) as f32;
@@ -195,10 +191,14 @@ fn main() -> Result<()> {
     let model_path = parse_arg_value(&args, "--model", "model/scrfd_500m_bnkps.onnx");
 
     let mut session = Session::builder()?
+        .with_execution_providers([
+            QNNExecutionProvider::default().build(),
+            DirectMLExecutionProvider::default().build(),
+        ])?
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
         .commit_from_file(model_path)?;
 
-    println!("Model Loaded. Detection started...");
+    println!("Model Loaded with QNN/DirectML support. Detection started...");
 
     let mut cam = if video_src == "0" {
         let mut c = videoio::VideoCapture::new(0, videoio::CAP_ANY).context("camera")?;
@@ -208,6 +208,7 @@ fn main() -> Result<()> {
         if height_opt > 0 {
             let _ = c.set(videoio::CAP_PROP_FRAME_HEIGHT, height_opt as f64);
         }
+        let _ = c.set(videoio::CAP_PROP_FPS, 60.0);
         let _ = c.set(videoio::CAP_PROP_BUFFERSIZE, 1.0);
         c
     } else {
