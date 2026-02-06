@@ -8,6 +8,8 @@ use ort::{
     value::Value,
 };
 use std::env;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 fn parse_arg_value(args: &[String], key: &str, default: &str) -> String {
@@ -28,9 +30,7 @@ fn iou(a: core::Rect, b: core::Rect) -> f32 {
     let y1 = a.y.max(b.y);
     let x2 = (a.x + a.width).min(b.x + b.width);
     let y2 = (a.y + a.height).min(b.y + b.height);
-    if x2 <= x1 || y2 <= y1 {
-        return 0.0;
-    }
+    if x2 <= x1 || y2 <= y1 { return 0.0; }
     let inter = (x2 - x1) * (y2 - y1);
     let area_a = a.width * a.height;
     let area_b = b.width * b.height;
@@ -39,30 +39,15 @@ fn iou(a: core::Rect, b: core::Rect) -> f32 {
 
 fn nms(boxes: Vec<core::Rect>, scores: Vec<f32>, iou_thresh: f32) -> Vec<(core::Rect, f32)> {
     let mut order: Vec<usize> = (0..scores.len()).collect();
-    order.sort_by(|&i, &j| {
-        scores[j]
-            .partial_cmp(&scores[i])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut keep: Vec<(core::Rect, f32)> = Vec::new();
+    order.sort_by(|&i, &j| scores[j].partial_cmp(&scores[i]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut keep = Vec::new();
     let mut suppressed = vec![false; scores.len()];
     for &i in &order {
-        if suppressed[i] {
-            continue;
-        }
-        let bi = boxes[i];
-        let si = scores[i];
-        keep.push((bi, si));
+        if suppressed[i] { continue; }
+        keep.push((boxes[i], scores[i]));
         for &j in &order {
-            if suppressed[j] {
-                continue;
-            }
-            if j == i {
-                continue;
-            }
-            if iou(bi, boxes[j]) > iou_thresh {
-                suppressed[j] = true;
-            }
+            if suppressed[j] || j == i { continue; }
+            if iou(boxes[i], boxes[j]) > iou_thresh { suppressed[j] = true; }
         }
     }
     keep
@@ -75,22 +60,10 @@ fn letterbox(img: &core::Mat, size: (i32, i32)) -> Result<(core::Mat, f32, i32, 
     let nw = (w as f32 * r).round() as i32;
     let nh = (h as f32 * r).round() as i32;
     let mut resized = core::Mat::default();
-    imgproc::resize(
-        img,
-        &mut resized,
-        core::Size::new(nw, nh),
-        0.0,
-        0.0,
-        imgproc::INTER_LINEAR,
-    )?;
+    imgproc::resize(img, &mut resized, core::Size::new(nw, nh), 0.0, 0.0, imgproc::INTER_LINEAR)?;
     let dx = (size.0 - nw) / 2;
     let dy = (size.1 - nh) / 2;
-    let mut out = core::Mat::new_rows_cols_with_default(
-        size.1,
-        size.0,
-        core::CV_8UC3,
-        core::Scalar::new(114.0, 114.0, 114.0, 0.0),
-    )?;
+    let mut out = core::Mat::new_rows_cols_with_default(size.1, size.0, core::CV_8UC3, core::Scalar::new(114.0, 114.0, 114.0, 0.0))?;
     let roi = core::Rect::new(dx, dy, nw, nh);
     let mut dst = core::Mat::roi_mut(&mut out, roi)?;
     resized.copy_to(&mut dst)?;
@@ -99,260 +72,128 @@ fn letterbox(img: &core::Mat, size: (i32, i32)) -> Result<(core::Mat, f32, i32, 
 
 fn to_tensor_ndarray(mat: &core::Mat) -> Result<Array4<f32>> {
     let mut rgb = core::Mat::default();
-    imgproc::cvt_color(
-        mat,
-        &mut rgb,
-        imgproc::COLOR_BGR2RGB,
-        0,
-        core::AlgorithmHint::ALGO_HINT_APPROX,
-    )?;
-
+    imgproc::cvt_color(mat, &mut rgb, imgproc::COLOR_BGR2RGB, 0, core::AlgorithmHint::ALGO_HINT_APPROX)?;
     let mut float_mat = core::Mat::default();
-    // (x - 127.5) / 128.0  => x * (1/128) - (127.5/128)
     rgb.convert_to(&mut float_mat, core::CV_32F, 0.0078125, -0.99609375)?;
-
     let rows = float_mat.rows() as usize;
     let cols = float_mat.cols() as usize;
     let mut array = Array4::<f32>::zeros((1, 3, rows, cols));
-
     let mut planes = opencv::core::Vector::<core::Mat>::new();
     core::split(&float_mat, &mut planes)?;
-
     for i in 0..3 {
         let plane = planes.get(i)?;
         let data = plane.data_bytes()?;
         let slice = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, rows * cols) };
-        array
-            .index_axis_mut(ndarray::Axis(1), i)
-            .assign(&ndarray::Array2::from_shape_vec(
-                (rows, cols),
-                slice.to_vec(),
-            )?);
+        array.index_axis_mut(ndarray::Axis(1), i).assign(&ndarray::Array2::from_shape_vec((rows, cols), slice.to_vec())?);
     }
     Ok(array)
 }
 
-fn scrfd_infer(session: &mut Session, input: Array4<f32>) -> Result<(Vec<f32>, Vec<f32>)> {
-    let input_tensor = Value::from_array(input)?;
-    let outputs = session.run(inputs![input_tensor])?;
-
+fn scrfd_infer(session: &mut Session, input: Array4<f32>) -> Result<(Vec<core::Rect>, Vec<f32>)> {
+    let outputs = session.run(inputs![Value::from_array(input)?])?;
     let mut all_boxes = Vec::new();
     let mut all_scores = Vec::new();
-
     let strides = [8, 16, 32];
-    // SCRFD Output indices:
-    // Scores: 0 (s8), 1 (s16), 2 (s32)
-    // BBoxes: 3 (b8), 4 (b16), 5 (b32)
-
     for (i, &stride) in strides.iter().enumerate() {
-        let scores_view = outputs[i].try_extract_tensor::<f32>()?;
-        let bboxes_view = outputs[i + 3].try_extract_tensor::<f32>()?;
-
-        let scores = scores_view.1;
-        let bboxes = bboxes_view.1;
-
-        let num_points = scores.len();
-        let num_anchors = 2;
-
+        let scores = outputs[i].try_extract_tensor::<f32>()?.1;
+        let bboxes = outputs[i + 3].try_extract_tensor::<f32>()?.1;
         let feat_w = 640 / stride;
-
-        for idx in 0..num_points {
-            let score = scores[idx];
-            if score < 0.3 {
-                continue;
-            }
-
-            let _anchor_idx = idx % num_anchors;
-            let grid_idx = idx / num_anchors;
+        for idx in 0..scores.len() {
+            if scores[idx] < 0.3 { continue; }
+            let grid_idx = idx / 2;
             let row = (grid_idx / feat_w as usize) as f32;
             let col = (grid_idx % feat_w as usize) as f32;
-
-            let b_offset = idx * 4;
-            let l = bboxes[b_offset + 0] * stride as f32;
-            let t = bboxes[b_offset + 1] * stride as f32;
-            let r = bboxes[b_offset + 2] * stride as f32;
-            let b = bboxes[b_offset + 3] * stride as f32;
-
-            let cx = col * stride as f32;
-            let cy = row * stride as f32;
-
-            all_boxes.push(cx - l);
-            all_boxes.push(cy - t);
-            all_boxes.push(cx + r);
-            all_boxes.push(cy + b);
-            all_scores.push(score);
+            let (l, t, r, b) = (bboxes[idx*4]*stride as f32, bboxes[idx*4+1]*stride as f32, bboxes[idx*4+2]*stride as f32, bboxes[idx*4+3]*stride as f32);
+            all_boxes.push(core::Rect::new((col*stride as f32 - l) as i32, (row*stride as f32 - t) as i32, (l+r) as i32, (t+b) as i32));
+            all_scores.push(scores[idx]);
         }
     }
-
     Ok((all_boxes, all_scores))
 }
 
 use std::process::Command;
-
 fn get_youtube_url(url: &str) -> Result<String> {
-    let output = Command::new(".\\yt-dlp.exe")
-        .args([
-            "-f", "bestvideo[height<=720]/best[height<=720]",
-            "--get-url",
-            "--no-playlist",
-            url,
-        ])
-        .output()
-        .context("Failed to execute yt-dlp.exe")?;
-    if !output.status.success() {
-        anyhow::bail!("yt-dlp failed: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    let stdout = String::from_utf8(output.stdout)?;
-    let urls: Vec<&str> = stdout.trim().lines().collect();
-    if urls.is_empty() { anyhow::bail!("No URL found by yt-dlp"); }
-    Ok(urls[0].to_string())
+    let output = Command::new(".\\yt-dlp.exe").args(["-f", "bestvideo[height<=720]/best[height<=720]", "--get-url", "--no-playlist", url]).output()?;
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
+
+#[derive(Clone)]
+struct Detection { rect: core::Rect, score: f32, color: core::Scalar }
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    let mut video_src = if args.len() > 1 {
-        if args[1].starts_with("--") { "0".to_string() } else { args[1].clone() }
-    } else { "0".to_string() };
+    let mut video_src = if args.len() > 1 && !args[1].starts_with("--") { args[1].clone() } else { "0".to_string() };
+    if video_src.starts_with("http") { video_src = get_youtube_url(&video_src)?; }
+    let show_fps = args.iter().any(|a| a == "--fps");
 
-    if video_src.starts_with("http") {
-        video_src = get_youtube_url(&video_src)?;
+    let session = Arc::new(Mutex::new(Session::builder()?
+        .with_execution_providers([QNNExecutionProvider::default().build(), DirectMLExecutionProvider::default().build()])?
+        .commit_from_file("model/scrfd_500m_bnkps.onnx")?));
+
+    let mut cam = if video_src == "0" { videoio::VideoCapture::new(0, videoio::CAP_ANY)? } else { videoio::VideoCapture::from_file(&video_src, videoio::CAP_ANY)? };
+    let fps = cam.get(videoio::CAP_PROP_FPS).unwrap_or(30.0);
+    let frame_delay = if fps > 0.0 { 1000.0 / fps } else { 33.33 };
+
+    let detections = Arc::new(Mutex::new(Vec::<Detection>::new()));
+    let next_frame = Arc::new(Mutex::new(None::<core::Mat>));
+    
+    {
+        let sess = Arc::clone(&session);
+        let dets_shared = Arc::clone(&detections);
+        let frame_shared = Arc::clone(&next_frame);
+        thread::spawn(move || loop {
+            let frame_opt = { let mut lock = frame_shared.lock().unwrap(); lock.take() };
+            if let Some(frame) = frame_opt {
+                if let Ok((lb, r, dx, dy)) = letterbox(&frame, (640, 640)) {
+                    if let Ok(input) = to_tensor_ndarray(&lb) {
+                        let mut lock = sess.lock().unwrap();
+                        if let Ok((rects, scores)) = scrfd_infer(&mut lock, input) {
+                            let mut results = Vec::new();
+                            for (rect, score) in nms(rects, scores, 0.45) {
+                                let x1 = ((rect.x as f32 - dx as f32) / r) as i32;
+                                let y1 = ((rect.y as f32 - dy as f32) / r) as i32;
+                                let x2 = (((rect.x + rect.width) as f32 - dx as f32) / r) as i32;
+                                let y2 = (((rect.y + rect.height) as f32 - dy as f32) / r) as i32;
+                                results.push(Detection { rect: core::Rect::new(x1, y1, x2-x1, y2-y1), score, color: core::Scalar::new(0.0, 255.0, 0.0, 0.0) });
+                                // Heuristic: expand face box to body
+                                let body_h = (y2 - y1) * 6;
+                                let body_w = (x2 - x1) * 4;
+                                let body_x = x1 - (body_w - (x2 - x1)) / 2;
+                                let body_y = y1;
+                                results.push(Detection { rect: core::Rect::new(body_x.max(0), body_y.max(0), body_w.min(frame.cols()-body_x), body_h.min(frame.rows()-body_y)), score: 0.0, color: core::Scalar::new(0.0, 0.0, 255.0, 0.0) });
+                            }
+                            let mut d_lock = dets_shared.lock().unwrap(); *d_lock = results;
+                        }
+                    }
+                }
+            } else { thread::sleep(Duration::from_millis(1)); }
+        });
     }
 
-    let width_opt: i32 = parse_arg_value(&args, "--width", "0").parse().unwrap_or(0);
-    let height_opt: i32 = parse_arg_value(&args, "--height", "0").parse().unwrap_or(0);
-    let conf_threshold: f32 = parse_arg_value(&args, "--confidence", "0.5").parse().unwrap_or(0.5);
-    let show_fps = args.iter().any(|a| a == "--fps");
-    let model_path = parse_arg_value(&args, "--model", "model/scrfd_500m_bnkps.onnx");
-
-    let mut session = Session::builder()?
-        .with_execution_providers([
-            QNNExecutionProvider::default().build(),
-            DirectMLExecutionProvider::default().build(),
-        ])?
-        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
-        .commit_from_file(model_path)?;
-
-    println!("Model Loaded with QNN/DirectML support. Detection started...");
-
-    let mut cam = if video_src == "0" {
-        let mut c = videoio::VideoCapture::new(0, videoio::CAP_ANY).context("camera")?;
-        if width_opt > 0 { let _ = c.set(videoio::CAP_PROP_FRAME_WIDTH, width_opt as f64); }
-        if height_opt > 0 { let _ = c.set(videoio::CAP_PROP_FRAME_HEIGHT, height_opt as f64); }
-        let _ = c.set(videoio::CAP_PROP_FPS, 60.0);
-        let _ = c.set(videoio::CAP_PROP_BUFFERSIZE, 1.0);
-        c
-    } else {
-        let mut c = videoio::VideoCapture::from_file(&video_src, videoio::CAP_ANY).with_context(|| format!("video {}", video_src))?;
-        let _ = c.set(videoio::CAP_PROP_BUFFERSIZE, 1.0);
-        c
-    };
-    if !videoio::VideoCapture::is_opened(&cam)? { anyhow::bail!("source not opened") }
-
-    let window = "RustSight - SCRFD Multi-Scale";
-    highgui::named_window(window, highgui::WINDOW_NORMAL).context("window")?;
+    highgui::named_window("RustSight", highgui::WINDOW_NORMAL)?;
     let mut frame = core::Mat::default();
-    let mut fps_last = Instant::now();
-    let mut fps_frames: u32 = 0;
-    let mut fps_value: f32 = 0.0;
+    let mut last_fps = Instant::now();
+    let mut frames = 0;
+    let mut fps_val = 0.0;
 
     loop {
-        if !cam.read(&mut frame)? || frame.empty() {
-            if video_src == "0" { continue } else { break }
+        let start = Instant::now();
+        if !cam.read(&mut frame)? || frame.empty() { if video_src == "0" { continue } else { break } }
+        { let mut lock = next_frame.lock().unwrap(); if lock.is_none() { *lock = Some(frame.try_clone().unwrap()); } }
+        
+        let current_dets = { let lock = detections.lock().unwrap(); lock.clone() };
+        for det in current_dets {
+            imgproc::rectangle(&mut frame, det.rect, det.color, 2, imgproc::LINE_8, 0).ok();
+            if det.score > 0.0 { imgproc::put_text(&mut frame, &format!("{:.0}%", det.score*100.0), core::Point::new(det.rect.x, det.rect.y-5), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, det.color, 1, imgproc::LINE_AA, false).ok(); }
         }
 
-        let frame_width = frame.cols();
-        let frame_height = frame.rows();
+        frames += 1;
+        if last_fps.elapsed() >= Duration::from_secs(1) { fps_val = frames as f32 / last_fps.elapsed().as_secs_f32(); frames = 0; last_fps = Instant::now(); }
+        if show_fps { imgproc::put_text(&mut frame, &format!("FPS: {:.1}", fps_val), core::Point::new(10, 30), imgproc::FONT_HERSHEY_SIMPLEX, 0.7, core::Scalar::new(255.0, 255.0, 255.0, 0.0), 2, imgproc::LINE_AA, false).ok(); }
 
-        let (lb, r, dx, dy) = letterbox(&frame, (640, 640))?;
-        let input = to_tensor_ndarray(&lb)?;
-        let (boxes, scores) = scrfd_infer(&mut session, input)?;
-
-        let mut rects: Vec<core::Rect> = Vec::new();
-        let mut confs: Vec<f32> = Vec::new();
-
-        let n = scores.len();
-        for i in 0..n {
-            let s = scores[i];
-            if s < conf_threshold {
-                continue;
-            }
-            let x1 = boxes[i * 4 + 0];
-            let y1 = boxes[i * 4 + 1];
-            let x2 = boxes[i * 4 + 2];
-            let y2 = boxes[i * 4 + 3];
-
-            let mut xi1 = ((x1 - dx as f32) / r).round() as i32;
-            let mut yi1 = ((y1 - dy as f32) / r).round() as i32;
-            let mut xi2 = ((x2 - dx as f32) / r).round() as i32;
-            let mut yi2 = ((y2 - dy as f32) / r).round() as i32;
-
-            xi1 = xi1.max(0);
-            yi1 = yi1.max(0);
-            xi2 = xi2.min(frame_width - 1);
-            yi2 = yi2.min(frame_height - 1);
-
-            if xi2 <= xi1 || yi2 <= yi1 {
-                continue;
-            }
-            rects.push(core::Rect::new(xi1, yi1, xi2 - xi1, yi2 - yi1));
-            confs.push(s);
-        }
-
-        let dets = nms(rects, confs, 0.45);
-        for (face_rect, score) in dets {
-            imgproc::rectangle(
-                &mut frame,
-                face_rect,
-                core::Scalar::new(0.0, 255.0, 0.0, 0.0),
-                2,
-                imgproc::LINE_8,
-                0,
-            )
-            .ok();
-            let label = format!("{:.2}%", score * 100.0);
-            imgproc::put_text(
-                &mut frame,
-                &label,
-                core::Point::new(face_rect.x, (face_rect.y - 10).max(0)),
-                imgproc::FONT_HERSHEY_SIMPLEX,
-                0.45,
-                core::Scalar::new(0.0, 255.0, 0.0, 0.0),
-                2,
-                imgproc::LINE_AA,
-                false,
-            )
-            .ok();
-        }
-
-        fps_frames += 1;
-        let elapsed = fps_last.elapsed();
-        if elapsed >= Duration::from_secs(1) {
-            fps_value = fps_frames as f32 / elapsed.as_secs_f32();
-            fps_frames = 0;
-            fps_last = Instant::now();
-        }
-        if show_fps {
-            let fps_text = format!("FPS: {:.1}", fps_value);
-            imgproc::put_text(
-                &mut frame,
-                &fps_text,
-                core::Point::new(10, 20),
-                imgproc::FONT_HERSHEY_SIMPLEX,
-                0.6,
-                core::Scalar::new(255.0, 255.0, 255.0, 0.0),
-                2,
-                imgproc::LINE_AA,
-                false,
-            )
-            .ok();
-        }
-
-        highgui::imshow(window, &frame).context("imshow")?;
-        let key = highgui::wait_key(1).context("key")?;
-        if key == 27 || (key != -1 && (key as u8 as char == 'q' || key as u8 as char == 'Q')) {
-            break;
-        }
+        highgui::imshow("RustSight", &frame)?;
+        let wait = (frame_delay - start.elapsed().as_millis() as f64).max(1.0) as i32;
+        if highgui::wait_key(wait)? == 27 { break; }
     }
-
     Ok(())
 }
