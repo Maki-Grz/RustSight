@@ -2,9 +2,22 @@
 name = "RustSight"
 version = "0.3.0"
 edition = "2024"
+authors = ["Maximilien GRZECZKA"]
+description = "High-performance face detection tool using SCRFD, ONNX Runtime, and OpenCV for Windows 11 ARM64."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Maki-Grz/RustSight"
+keywords = ["face-detection", "scrfd", "onnx", "arm64", "windows11"]
+categories = ["computer-vision", "science::robotics"]
 
 [dependencies]
 anyhow = "1.0.100"
 ndarray = "0.17.2"
 opencv = "0.98.1"
 ort = { version = "2.0.0-rc.9", features = ["directml", "qnn", "ndarray"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
