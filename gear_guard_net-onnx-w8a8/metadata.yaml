@@ -1,0 +1,32 @@
+runtime: onnx
+precision: w8a8
+tool_versions:
+  qairt: 2.42.0.251225135753_193295
+  onnx_runtime: 1.24.3
+model_files:
+  gear_guard_net.onnx:
+    inputs:
+      image:
+        shape: [1, 3, 320, 192]
+        dtype: uint8
+        quantization_parameters:
+          scale: 0.003921568859368563
+          zero_point: 0
+    outputs:
+      boxes:
+        shape: [1, 3780, 4]
+        dtype: uint8
+        quantization_parameters:
+          scale: 1.5097413063049316
+          zero_point: 27
+      scores:
+        shape: [1, 3780]
+        dtype: uint8
+        quantization_parameters:
+          scale: 0.0038347607478499413
+          zero_point: 0
+      class_idx:
+        shape: [1, 3780]
+        dtype: uint8
+supplementary_files:
+  labels.txt: Mapping of model prediction indices -> string labels.
